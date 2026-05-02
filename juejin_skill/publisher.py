@@ -44,9 +44,24 @@ class ArticlePublisher:
         tag_ids: list[str] | None = None,
         brief_content: str = "",
         cover_image: str = "",
-        save_draft_only: bool = False,
+        save_draft_only: bool = True,
+        allow_public_publish: bool = False,
     ) -> dict[str, Any]:
-        """Publish a Markdown article or save it as a draft.
+        """Create a draft on Juejin, or (opt-in) publish it publicly.
+
+        **Safe-by-default contract**
+
+        This method always creates a draft. A public publish ONLY happens
+        when **both** of the following are true:
+
+        * ``save_draft_only=False`` (caller opts out of the safe default), and
+        * ``allow_public_publish=True`` (explicit, human-reviewed intent).
+
+        This two-flag interlock exists so that automated agents cannot
+        accidentally publish to the user's Juejin account by forgetting a
+        single keyword argument. Earlier versions defaulted
+        ``save_draft_only=False``, which ClawScan correctly flagged as an
+        unsafe default at the API layer (Tool Misuse and Exploitation).
 
         Either *filepath* or *content* (with *title*) must be provided.
 
@@ -67,7 +82,12 @@ class ArticlePublisher:
         cover_image : str
             URL of the cover image.
         save_draft_only : bool
-            If ``True``, only create a draft without publishing.
+            If ``True`` (default), only create a draft - nothing is published
+            to the public feed.
+        allow_public_publish : bool
+            Required safety interlock. Must be explicitly set to ``True`` by
+            the caller when ``save_draft_only=False``, otherwise this method
+            refuses to publish and stays in draft-only mode.
 
         Returns
         -------
@@ -91,6 +111,22 @@ class ArticlePublisher:
             plain = content.replace("#", "").replace("*", "").replace("`", "").strip()
             brief_content = plain[:100]
 
+        # ---- Safety interlock --------------------------------------------------
+        # Refuse to publish publicly unless the caller explicitly opted in on
+        # both flags. This is the single source of truth for the draft-only
+        # policy advertised in SKILL.md.
+        publish_publicly = (not save_draft_only) and bool(allow_public_publish)
+        if (not save_draft_only) and (not allow_public_publish):
+            return {
+                "success": False,
+                "message": (
+                    "Refusing to publish: save_draft_only=False was passed but "
+                    "allow_public_publish=True was not. Public publishing requires "
+                    "explicit human-reviewed intent via both flags."
+                ),
+                "policy": "draft-only-by-default",
+            }
+
         # Step 1: create draft
         draft_data = self._create_draft(
             title=title,
@@ -105,7 +141,7 @@ class ArticlePublisher:
         if not draft_id:
             return {"success": False, "message": "Failed to create draft", "raw": draft_data}
 
-        if save_draft_only:
+        if not publish_publicly:
             return {
                 "success": True,
                 "message": f"Draft created successfully (draft_id={draft_id})",

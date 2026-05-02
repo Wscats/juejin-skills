@@ -127,6 +127,19 @@ class JuejinAuth:
 
     def _save_cookies(self, cookies: list[dict[str, Any]]) -> None:
         save_json_file(self._cookie_path, cookies)
+        # Restrict the cookie file to the current user (0600) so that other
+        # local users cannot read the Juejin session credential. This is a
+        # best-effort hardening – on POSIX only.
+        try:
+            os.chmod(self._cookie_path, 0o600)
+        except OSError:
+            pass
+        print(
+            "[JuejinAuth] ⚠️  A Juejin session cookie has been stored at "
+            f"{self._cookie_path}. Anyone with read access to this file can act "
+            "as you on Juejin. Delete it when you no longer need authenticated "
+            "access: rm " + self._cookie_path
+        )
 
     @staticmethod
     def _cookies_to_string(cookies: list[dict[str, Any]]) -> str:

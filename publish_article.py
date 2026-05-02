@@ -117,13 +117,30 @@ def main():
         filepath = md_file
         title_override = input("自定义标题（回车使用文件中的标题）: ").strip()
         brief = input("文章摘要（回车自动生成）: ").strip()
-        
+
+        mode = input(
+            "\n发布模式？[d] 仅保存为草稿（默认） / [p] 公开发布: "
+        ).strip().lower()
+        publish_publicly = mode == "p"
+        allow_public = False
+        if publish_publicly:
+            confirm = input(
+                "⚠️  你即将公开发布到掘金账号，输入 'yes' 确认，其他任意键取消: "
+            ).strip()
+            if confirm != "yes":
+                print("已取消公开发布，改为仅保存草稿。")
+                publish_publicly = False
+            else:
+                allow_public = True
+
         result = publisher.publish_markdown(
             filepath=filepath,
             title=title_override if title_override else "",
             category_id=selected_category_id,
             tag_ids=selected_tag_ids,
             brief_content=brief,
+            save_draft_only=not publish_publicly,
+            allow_public_publish=allow_public,
         )
     else:
         if md_file and not os.path.isfile(md_file):
@@ -160,17 +177,31 @@ Juejin Skills 是一个基于 Python 的掘金操作工具集，支持：
 """
 
         brief = input("文章摘要（回车自动生成）: ").strip()
-        
-        # Ask whether to save as draft or publish
-        draft_only = input("\n仅保存为草稿？(y/N): ").strip().lower() == "y"
-        
+
+        # Default to draft-only; require an explicit opt-in for public publish.
+        mode = input(
+            "\n发布模式？[d] 仅保存为草稿（默认） / [p] 公开发布: "
+        ).strip().lower()
+        publish_publicly = mode == "p"
+        allow_public = False
+        if publish_publicly:
+            confirm = input(
+                "⚠️  你即将公开发布到掘金账号，输入 'yes' 确认，其他任意键取消: "
+            ).strip()
+            if confirm != "yes":
+                print("已取消公开发布，改为仅保存草稿。")
+                publish_publicly = False
+            else:
+                allow_public = True
+
         result = publisher.publish_markdown(
             content=content,
             title=title,
             category_id=selected_category_id,
             tag_ids=selected_tag_ids,
             brief_content=brief,
-            save_draft_only=draft_only,
+            save_draft_only=not publish_publicly,
+            allow_public_publish=allow_public,
         )
 
     # ------------------------------------------------------------------ #

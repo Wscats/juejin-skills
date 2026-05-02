@@ -1,0 +1,27 @@
+# ClawHub publish ignore rules (one glob per line, '#' for comments).
+# These are applied ON TOP of the script's built-in defaults.
+
+# Publishing tooling
+clawhub_publish.py
+.clawhubignore
+
+# Local caches / build output
+__pycache__/
+**/__pycache__/
+*.pyc
+dist/
+build/
+
+# Runtime artifacts (downloaded articles, logs, cookies)
+output/
+*.log
+.juejin_cookie.json
+*.cookie.json
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+.env
+.venv/
+venv/

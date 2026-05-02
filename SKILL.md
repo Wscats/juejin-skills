@@ -1,8 +1,60 @@
 ---
+version: 1.0.2
 name: juejin-skills
 license: MIT
 description: 掘金技术社区一站式操作技能，支持热门文章排行榜查询、Markdown 文章一键发布和文章下载保存为 Markdown。
+source: https://github.com/wscats/juejin
+homepage: https://github.com/wscats/juejin
+repository:
+  type: git
+  url: https://github.com/wscats/juejin.git
+author: wscats
+credentials:
+  - name: juejin_session_cookie
+    description: 通过 Playwright 浏览器登录后获得的掘金登录态 Cookie。
+    storage_path: ~/.juejin_cookie.json
+    storage_format: plain-text JSON
+    file_permissions: "0600 (owner-only read/write, enforced by auth._save_cookies)"
+    scope: 对用户登录的掘金账号具有读写权限（可发文章、读取私有草稿等）。
+    rotation: 用户可随时通过删除 ~/.juejin_cookie.json 撤销访问；Cookie 过期后需要重新登录。
+    hardening:
+      - 不要在多人共享的机器或 CI 容器中使用（Cookie 即账号登录态）。
+      - 使用完毕立即执行 `rm ~/.juejin_cookie.json` 撤销。
+      - 不要将该文件提交到版本库；本仓库已在 `.clawhubignore` / `.gitignore` 中排除。
+permissions:
+  - network: 访问 https://juejin.cn/ 与 https://api.juejin.cn/
+  - filesystem_write: 写入 ~/.juejin_cookie.json（会话凭证）及 ./output/*.md（下载文章）
+  - browser_automation: 启动本地 Chromium 用于登录
+publish_policy: draft-only-by-default  # 任何公开发布都需要用户显式确认
+publish_policy_enforcement:
+  api_layer: |
+    juejin_skill.publisher.ArticlePublisher.publish_markdown() 的默认参数为
+    save_draft_only=True, allow_public_publish=False。两个标志都需要被显式
+    改为 False / True 时才会触发公开发布；任何一侧缺失都会直接拒绝并返回
+    draft 结果。
+  cli_layer: |
+    run_publish.py 默认 draft-only；公开发布需要同时满足：
+    (1) --publish 命令行开关, (2) 环境变量 JUEJIN_CONFIRM_PUBLISH=1,
+    (3) 交互式输入 'yes'。publish_article.py 的交互流程同样默认走草稿分支，
+    选择公开发布后需要再次键入 'yes' 确认。
+
 ---
+
+> ⚠️ **凭证与权限声明**
+>
+> 本技能在登录成功后会把掘金会话 Cookie 以明文 JSON 形式保存到
+> `~/.juejin_cookie.json`（文件权限会被设置为 `0600`，仅当前用户可读写）。
+> 只要该文件存在且未过期，后续调用即可以你的身份访问掘金账号（发布文章、
+> 读取草稿等）。
+>
+> - 仅在你愿意把掘金登录态保存在本机时才登录，**避免在共享/CI 环境运行**；
+> - 使用结束后请执行 `rm ~/.juejin_cookie.json` 主动撤销；
+> - 不要将该文件提交版本库（仓库已默认忽略）；
+> - 本技能**默认只创建草稿**：API 层 `ArticlePublisher.publish_markdown()`
+>   的默认行为是 `save_draft_only=True`，且公开发布还需要调用方额外显式
+>   传入 `allow_public_publish=True`。入口脚本 `run_publish.py` 和
+>   `publish_article.py` 则在此之上再加了命令行/交互式的人工确认门。
+
 # Juejin Skills - 掘金技术社区操作技能
 
 ## 🚀 快速使用
