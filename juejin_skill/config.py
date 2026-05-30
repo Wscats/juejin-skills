@@ -4,6 +4,15 @@
 JUEJIN_WEB_URL = "https://juejin.cn"
 JUEJIN_API_BASE = "https://api.juejin.cn"
 
+# Allowed image domains for download (security restriction)
+ALLOWED_IMAGE_DOMAINS = [
+    "juejin.cn",
+    "p1-juejin.byteimg.com",
+    "p3-juejin.byteimg.com",
+    "p6-juejin.byteimg.com",
+    "p9-juejin.byteimg.com",
+]
+
 # API endpoints
 CATEGORY_BRIEFS_URL = f"{JUEJIN_API_BASE}/tag_api/v1/query_category_briefs"
 CATEGORY_TAGS_URL = f"{JUEJIN_API_BASE}/recommend_api/v1/tag/recommend_tag_list"

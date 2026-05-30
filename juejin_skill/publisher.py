@@ -13,6 +13,114 @@ from juejin_skill.config import (
     CATEGORY_BRIEFS_URL,
 )
 
+# ---------------------------------------------------------------------- #
+#  Filesystem read safety constants
+# ---------------------------------------------------------------------- #
+# Maximum size of a Markdown file that this skill is willing to read (bytes).
+# Anything larger is refused outright to avoid memory-exhaustion / huge payloads.
+MAX_MARKDOWN_FILE_SIZE = 2 * 1024 * 1024  # 2 MiB
+
+# Only files with these extensions can be read by publish_markdown().
+ALLOWED_MARKDOWN_EXTS = (".md", ".markdown")
+
+# Path prefixes that are always refused, even if the user explicitly types them.
+# These cover obvious sources of secrets / system files. The list is conservative
+# and is *in addition to* the "must live under an allowed root" check below.
+DENIED_PATH_PREFIXES = (
+    "/etc/",
+    "/var/",
+    "/proc/",
+    "/sys/",
+    "/dev/",
+    "/root/",
+    "/boot/",
+    os.path.expanduser("~/.ssh"),
+    os.path.expanduser("~/.aws"),
+    os.path.expanduser("~/.config"),
+    os.path.expanduser("~/.juejin_cookie.json"),
+)
+
+
+def _resolve_allowed_roots() -> list[str]:
+    """Return the list of directories from which Markdown files may be read.
+
+    By default we only allow the current working directory (where the user
+    invoked the skill) and an explicit ``$JUEJIN_MD_ROOT`` override. This keeps
+    file-read access scoped and auditable, matching the ``filesystem_read``
+    declaration in SKILL.md.
+    """
+    roots: list[str] = [os.path.realpath(os.getcwd())]
+    extra = os.environ.get("JUEJIN_MD_ROOT", "").strip()
+    if extra:
+        roots.append(os.path.realpath(os.path.expanduser(extra)))
+    return roots
+
+
+def _validate_markdown_path(filepath: str) -> str:
+    """Validate *filepath* and return its canonical absolute path.
+
+    Raises
+    ------
+    ValueError
+        If the path is empty, points to a non-Markdown file, escapes the
+        allowed roots, hits a denied prefix, is not a regular file, or
+        exceeds :data:`MAX_MARKDOWN_FILE_SIZE`.
+    FileNotFoundError
+        If the file does not exist after path resolution.
+    """
+    if not filepath or not isinstance(filepath, str):
+        raise ValueError("filepath must be a non-empty string.")
+
+    # Resolve symlinks and ``..`` segments so the comparison below is reliable.
+    expanded = os.path.expanduser(filepath)
+    abs_path = os.path.realpath(expanded)
+
+    # Reject obviously sensitive locations even if the user types them in full.
+    for denied in DENIED_PATH_PREFIXES:
+        denied_real = os.path.realpath(os.path.expanduser(denied))
+        if abs_path == denied_real or abs_path.startswith(denied_real + os.sep):
+            raise ValueError(
+                f"Refusing to read from a denied path: {filepath!r}. "
+                "This skill never reads system, SSH, AWS, or credential files."
+            )
+
+    # Must live under one of the allowed roots (cwd or $JUEJIN_MD_ROOT).
+    allowed_roots = _resolve_allowed_roots()
+    if not any(
+        abs_path == root or abs_path.startswith(root + os.sep)
+        for root in allowed_roots
+    ):
+        raise ValueError(
+            f"Refusing to read {filepath!r}: path is outside the allowed "
+            f"roots {allowed_roots}. Move the file under the current working "
+            "directory, or set $JUEJIN_MD_ROOT to an explicit project folder."
+        )
+
+    # Extension allow-list.
+    ext = os.path.splitext(abs_path)[1].lower()
+    if ext not in ALLOWED_MARKDOWN_EXTS:
+        raise ValueError(
+            f"Refusing to read {filepath!r}: only {ALLOWED_MARKDOWN_EXTS} "
+            "files are allowed."
+        )
+
+    if not os.path.exists(abs_path):
+        raise FileNotFoundError(f"Markdown file not found: {filepath}")
+    if not os.path.isfile(abs_path):
+        raise ValueError(
+            f"Refusing to read {filepath!r}: not a regular file "
+            "(symlinks to directories, sockets, fifos, etc. are rejected)."
+        )
+
+    size = os.path.getsize(abs_path)
+    if size > MAX_MARKDOWN_FILE_SIZE:
+        raise ValueError(
+            f"Refusing to read {filepath!r}: file size {size} bytes exceeds "
+            f"the {MAX_MARKDOWN_FILE_SIZE}-byte limit."
+        )
+
+    return abs_path
+
 
 class ArticlePublisher:
     """Publish a Markdown article to Juejin.
@@ -268,11 +376,24 @@ class ArticlePublisher:
         """Read a Markdown file and extract (title, body).
 
         The title is taken from the first ``# heading`` line.
-        """
-        if not os.path.isfile(filepath):
-            raise FileNotFoundError(f"Markdown file not found: {filepath}")
 
-        with open(filepath, "r", encoding="utf-8") as f:
+        Security
+        --------
+        The path is validated by :func:`_validate_markdown_path` first:
+
+        * must live under the current working directory (or ``$JUEJIN_MD_ROOT``);
+        * must have a ``.md`` / ``.markdown`` extension;
+        * must be a regular file no larger than ``MAX_MARKDOWN_FILE_SIZE``;
+        * must not resolve to a system / credential location.
+
+        This matches the ``filesystem_read`` scope declared in SKILL.md and
+        prevents the skill from being coerced into reading arbitrary local
+        files (e.g. ``~/.ssh/id_rsa``) and exfiltrating them as article
+        content.
+        """
+        safe_path = _validate_markdown_path(filepath)
+
+        with open(safe_path, "r", encoding="utf-8") as f:
             raw = f.read()
 
         lines = raw.split("\n")

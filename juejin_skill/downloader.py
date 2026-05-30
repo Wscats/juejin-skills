@@ -15,6 +15,7 @@ from juejin_skill.config import (
     DEFAULT_PAGE_SIZE,
     JUEJIN_WEB_URL,
     DEFAULT_HEADERS,
+    ALLOWED_IMAGE_DOMAINS,
 )
 from juejin_skill.utils import (
     extract_article_id,
@@ -466,7 +467,10 @@ class ArticleDownloader:
         return all_articles[:max_count]
 
     def _download_images(self, md_text: str, output_dir: str, article_id: str) -> str:
-        """Download images referenced in the Markdown and rewrite paths."""
+        """Download images referenced in the Markdown and rewrite paths.
+        
+        Only downloads images from allowed domains (security restriction).
+        """
         img_dir = os.path.join(output_dir, "images", article_id)
         ensure_dir(img_dir)
 
@@ -476,6 +480,11 @@ class ArticleDownloader:
 
         for idx, (alt, url) in enumerate(matches, 1):
             try:
+                # Security check: only download from allowed domains
+                if not self._is_allowed_image_url(url):
+                    print(f"[Downloader] Skipping image from non-allowed domain: {url}")
+                    continue
+                    
                 ext = self._guess_image_ext(url)
                 filename = f"img_{idx}{ext}"
                 local_path = os.path.join(img_dir, filename)
@@ -491,6 +500,28 @@ class ArticleDownloader:
                 print(f"[Downloader] Failed to download image {url}: {exc}")
 
         return md_text
+
+    @staticmethod
+    def _is_allowed_image_url(url: str) -> bool:
+        """Check if the image URL is from an allowed domain.
+        
+        This prevents unauthorized outbound requests and SSRF attacks.
+        """
+        from urllib.parse import urlparse
+        
+        try:
+            parsed = urlparse(url)
+            domain = parsed.netloc.lower()
+            
+            # Check if domain is in allowed list
+            for allowed_domain in ALLOWED_IMAGE_DOMAINS:
+                if domain == allowed_domain or domain.endswith(f".{allowed_domain}"):
+                    return True
+            
+            return False
+        except Exception:
+            # If URL parsing fails, assume it's not allowed
+            return False
 
     @staticmethod
     def _guess_image_ext(url: str) -> str:

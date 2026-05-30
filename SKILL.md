@@ -1,8 +1,8 @@
 ---
-version: 1.0.2
+version: 1.0.6
 name: juejin-skills
 license: MIT
-description: 掘金技术社区一站式操作技能，支持热门文章排行榜查询、Markdown 文章一键发布和文章下载保存为 Markdown。
+description: 掘金技术社区一站式操作技能，支持热门文章排行榜查询、Markdown 文章发布（默认草稿）和文章下载保存为 Markdown。
 source: https://github.com/wscats/juejin
 homepage: https://github.com/wscats/juejin
 repository:
@@ -22,9 +22,25 @@ credentials:
       - 使用完毕立即执行 `rm ~/.juejin_cookie.json` 撤销。
       - 不要将该文件提交到版本库；本仓库已在 `.clawhubignore` / `.gitignore` 中排除。
 permissions:
-  - network: 访问 https://juejin.cn/ 与 https://api.juejin.cn/
-  - filesystem_write: 写入 ~/.juejin_cookie.json（会话凭证）及 ./output/*.md（下载文章）
-  - browser_automation: 启动本地 Chromium 用于登录
+  - network: |
+      仅访问 https://juejin.cn/ 与 https://api.juejin.cn/。
+      下载文章中的图片时，仅允许从掘金官方图床域名拉取
+      （juejin.cn / *.byteimg.com，详见 juejin_skill/config.py 中的
+      ALLOWED_IMAGE_DOMAINS 白名单）；其他域名一律跳过。
+  - filesystem_read: |
+      仅读取用户显式提供的 .md / .markdown 文件，且必须满足：
+      (1) 路径位于当前工作目录之下，或位于环境变量 $JUEJIN_MD_ROOT 指向的目录之下；
+      (2) 文件大小 ≤ 2 MiB；
+      (3) 不在 /etc, /var, /proc, /sys, /dev, /root, /boot,
+          ~/.ssh, ~/.aws, ~/.config, ~/.juejin_cookie.json 等敏感前缀下。
+      违反任一规则时，juejin_skill.publisher._validate_markdown_path() 会直接
+      拒绝读取。本技能不会主动遍历目录、不会读取无关后缀的文件、不会跟随
+      指向上述受限位置的符号链接。
+  - filesystem_write: |
+      仅写入两个固定位置：
+      (1) ~/.juejin_cookie.json（会话凭证，权限 0600）；
+      (2) ./output/*.md 及 ./output/images/<article_id>/* （下载的文章及其图片）。
+  - browser_automation: 启动本地 Chromium 仅用于在 https://juejin.cn 完成登录获取 Cookie。
 publish_policy: draft-only-by-default  # 任何公开发布都需要用户显式确认
 publish_policy_enforcement:
   api_layer: |
@@ -58,26 +74,26 @@ publish_policy_enforcement:
 # Juejin Skills - 掘金技术社区操作技能
 
 ## 🚀 快速使用
-本技能支持以下自然语言指令，直接对 AI 说出即可：
+本技能仅在用户**明确、字面**提到下列意图时才被调用。
+模糊的、推断出的或捎带提到“掘金/发布/下载”的请求**不会**触发本技能；
+遇到不确定的情况，AI 应当先向用户澄清，而不是直接执行。
 
-### 热门文章排行榜
-- "获取掘金热门文章排行榜"
-- "查看掘金前端分类的热门文章"
-- "掘金有哪些文章分类？"
-- "获取掘金后端/前端/Android/iOS/人工智能分类的热门趋势"
-- "帮我看看掘金最近最火的文章是哪些"
+### 热门文章排行榜（只读，无副作用）
+- “获取掘金热门文章排行榜”
+- “查看掘金前端分类的热门文章”
+- “掘金有哪些文章分类？”
 
-### 文章发布
-- "帮我把这篇 Markdown 文章发布到掘金"
-- "发布文章到掘金，分类为前端，标签为 Vue.js"
-- "一键发布文章到掘金平台"
-- "登录掘金账号"（会通过 Playwright 打开浏览器让你登录）
+### 文章发布（需要登录态 + 显式 .md 路径）
+- “把 ./xxx.md 这个文件作为草稿发布到掘金，分类前端，标签 Vue.js”
+- “登录掘金账号”（会通过 Playwright 打开浏览器让你登录）
+- 注：用户必须显式给出位于当前工作目录下的 `.md` 文件路径，
+  或直接粘贴 Markdown 正文。AI **不得**主动猜测或代填路径，
+  也**不得**把诸如 `~/.ssh/...`、`/etc/...`、`~/.juejin_cookie.json`
+  这类路径喂给本技能。
 
-### 文章下载
-- "下载掘金文章并保存为 Markdown"
-- "把这篇掘金文章保存到本地"
-- "批量下载掘金某个作者的所有文章"
-- "下载这个链接的掘金文章：https://juejin.cn/post/xxx"
+### 文章下载（只接受用户显式给出的 juejin.cn 链接或 article_id）
+- “下载这条链接的掘金文章：https://juejin.cn/post/xxx”
+- “把这位作者（链接：https://juejin.cn/user/xxx）的最新 N 篇文章保存到本地”
 
 ---
 
@@ -93,28 +109,38 @@ publish_policy_enforcement:
 
 ## 激活条件
 
-当用户说出或暗示以下内容时，做出回应：
+本技能采取**严格字面匹配**策略：仅当用户的请求**同时**满足下列三项时，
+才认为该请求属于本技能的范围：
 
-### 1. 热门文章排行榜技能
-- 用户想要获取掘金网站热门文章排行榜
-- 用户需要查询掘金文章分类列表
-- 用户想了解各分类的热门文章趋势
-- 用户需要获取全部领域或特定领域的热门文章
-- 用户想要了解掘金技术文章排行、阅读量排名
-- 关键词：掘金、热门、排行榜、文章分类、趋势、热榜
+1. 请求中字面出现“掘金”或域名 `juejin.cn`（不接受“某社区”“技术博客”
+   等泛指）；
+2. 请求所表达的动作落在“查询热门列表 / 发布 .md 草稿 / 下载已知 URL”
+   这三类窄定义场景之一；
+3. 触发任何写操作（登录、发布、下载到磁盘）的请求都必须带有用户**亲自
+   提供**的具体参数（.md 路径、文章 URL、分类名等），AI 不得自行编造。
 
-### 2. 文章发布技能
-- 用户想要将 Markdown 文章发布到掘金平台
-- 用户需要登录掘金账号（通过 Playwright 浏览器登录获取 Cookie）
-- 用户想要设置文章分类、标签、摘要和封面图
-- 用户需要一键发布文章到掘金
-- 关键词：发布、发文、投稿、掘金、Markdown
+如果上述任一条件不满足，AI 应当先向用户澄清，**不要**激活本技能。
 
-### 3. 文章下载技能
-- 用户想要下载掘金文章并保存为 Markdown 格式
-- 用户需要批量下载某作者的掘金文章
-- 用户想要保存掘金文章到本地
-- 关键词：下载、保存、导出、Markdown、掘金文章
+### 1. 热门文章排行榜（只读）
+- 触发示例：用户字面询问“掘金 + (热门 / 排行榜 / 热榜 / 分类列表)”。
+- **不**触发示例：“最近前端有什么火的”“给我推荐几篇好文章”——
+  这些不含“掘金”字样，本技能保持沉默。
+
+### 2. 文章发布（写操作，需登录态 + 显式输入）
+- 触发示例：用户字面要求“(发布 / 发文 / 投稿 / 草稿) + 掘金”，
+  并提供下列至少一项：
+  - 当前工作目录下的 `.md` 文件路径，或
+  - 直接粘贴的 Markdown 正文。
+- **不**触发示例：仅说“一键发布”“帮我发个文”而未指明掘金；
+  仅模糊提到“掘金”但未给出文件或正文；
+  请求读取 `~/.ssh`、`/etc`、`~/.juejin_cookie.json` 等敏感路径。
+  这些情况下应拒绝并要求澄清。
+
+### 3. 文章下载（写操作到 ./output）
+- 触发示例：用户字面给出 `juejin.cn/post/<id>` 或 `juejin.cn/user/<id>`
+  链接，并字面要求“下载 / 保存 / 导出”。
+- **不**触发示例：要求下载非掘金域名的文章；要求把下载结果写入
+  `./output/` 之外的路径——这些应被拒绝。
 
 ## 功能清单
 
@@ -201,3 +227,32 @@ AI：正在登录掘金账号并发布文章...
 用户：下载这篇掘金文章 https://juejin.cn/post/7300000000000000000
 AI：正在下载文章并转换为 Markdown 格式...
 ```
+
+## 🔒 安全限制与风险警告
+
+### 本地文件读取安全限制（`filesystem_read`）
+- `publish_markdown(filepath=...)` 会经过
+  `juejin_skill.publisher._validate_markdown_path()` 校验，仅接受：
+  - 位于当前工作目录（或 `$JUEJIN_MD_ROOT`）之下的 `.md` / `.markdown` 文件；
+  - 文件大小 ≤ 2 MiB；
+  - 不在 `/etc`、`/var`、`/proc`、`/sys`、`/dev`、`/root`、`/boot`、
+    `~/.ssh`、`~/.aws`、`~/.config`、`~/.juejin_cookie.json` 等敏感前缀下的文件。
+- 路径会使用 `os.path.realpath` 解析后再比对，以防止符号链接逃逸、
+  `..` 路径馑越、以及伪造后缀绕过检查。
+- 违反任一规则都会抩出 `ValueError`，不会走到 `open()`，也不会被填到
+  草稿 / 发布 / 任何外发请求中。
+
+### 图片下载安全限制
+- 图片下载功能仅允许下载来自掘金官方域名的图片
+- 支持的域名：juejin.cn, p1-juejin.byteimg.com, p3-juejin.byteimg.com, p6-juejin.byteimg.com, p9-juejin.byteimg.com
+- 其他域名的图片将被自动跳过，防止SSRF攻击和未经授权的出站请求
+
+### 发布安全机制
+- 默认只创建草稿，不公开发布
+- 公开发布需要双重确认：`save_draft_only=False` 和 `allow_public_publish=True`
+- 命令行工具需要额外的环境变量和交互式确认
+
+### 网络访问限制
+- 仅允许访问 juejin.cn 和 api.juejin.cn 域名
+- 图片下载有严格的域名白名单限制
+- 防止潜在的策略绕过和跟踪风险
