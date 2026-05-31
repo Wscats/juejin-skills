@@ -1,5 +1,5 @@
 ---
-version: 1.0.7
+version: 1.0.8
 name: juejin-skills
 license: MIT
 description: 掘金技术社区一站式操作技能，支持热门文章排行榜查询、Markdown 文章发布（默认草稿）和文章下载保存为 Markdown。
