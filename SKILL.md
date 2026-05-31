@@ -1,5 +1,5 @@
 ---
-version: 1.0.6
+version: 1.0.7
 name: juejin-skills
 license: MIT
 description: 掘金技术社区一站式操作技能，支持热门文章排行榜查询、Markdown 文章发布（默认草稿）和文章下载保存为 Markdown。
@@ -37,11 +37,17 @@ permissions:
       拒绝读取。本技能不会主动遍历目录、不会读取无关后缀的文件、不会跟随
       指向上述受限位置的符号链接。
   - filesystem_write: |
-      仅写入两个固定位置：
+      仅允许写入下列位置：
       (1) ~/.juejin_cookie.json（会话凭证，权限 0600）；
-      (2) ./output/*.md 及 ./output/images/<article_id>/* （下载的文章及其图片）。
+      (2) ./output/ 及其子目录（下载的文章 .md 与图片）。
+      允许用户通过环境变量 $JUEJIN_OUTPUT_ROOT 重定位上述
+      ./output 根目录，但任何 download_article / download_user_articles 写入的
+      路径都会经过 juejin_skill.downloader._validate_output_dir() 校验：
+      路径会用 os.path.realpath 解析，有效抵御符号链接、`..` 馑越、
+      以及伪造后缀绕过。任何解析后越出该根目录的写请求都会被拒绝。
   - browser_automation: 启动本地 Chromium 仅用于在 https://juejin.cn 完成登录获取 Cookie。
 publish_policy: draft-only-by-default  # 任何公开发布都需要用户显式确认
+bulk_download_policy: opt-in-with-hard-cap  # 批量下载需显式确认且受硬上限控制
 publish_policy_enforcement:
   api_layer: |
     juejin_skill.publisher.ArticlePublisher.publish_markdown() 的默认参数为
@@ -53,6 +59,18 @@ publish_policy_enforcement:
     (1) --publish 命令行开关, (2) 环境变量 JUEJIN_CONFIRM_PUBLISH=1,
     (3) 交互式输入 'yes'。publish_article.py 的交互流程同样默认走草稿分支，
     选择公开发布后需要再次键入 'yes' 确认。
+bulk_download_policy_enforcement:
+  api_layer: |
+    juejin_skill.downloader.ArticleDownloader.download_user_articles() 需要
+    显式传入 confirm_bulk=True 才会执行，否则只返回拒绝响应。
+    max_count 默认为 BULK_DOWNLOAD_DEFAULT (20)，并被 BULK_DOWNLOAD_HARD_CAP
+    (50) 强制夹住；调用方传入更大的值会被静默降级。
+    download_article() / download_user_articles() 的 output_dir 参数都会经过
+    _validate_output_dir() 校验，任何越出 ./output (或 $JUEJIN_OUTPUT_ROOT) 的
+    写请求都会被拒绝。
+  cli_layer: |
+    上层 CLI / Agent 调用方负责在打开 confirm_bulk 之前跳出人工确认门
+    （例如要求用户输入 yes / 点击确认按钮）。
 
 ---
 
@@ -142,6 +160,15 @@ publish_policy_enforcement:
 - **不**触发示例：要求下载非掘金域名的文章；要求把下载结果写入
   `./output/` 之外的路径——这些应被拒绝。
 
+#### 3.1 批量下载（需人工确认 + 硬上限）
+- `download_user_articles` 需要调用方显式传入 `confirm_bulk=True`，
+  未传时该方法会直接拒绝并返回提示。
+- `max_count` 默认 20、硬上限 50；AI / CLI 不得在未获得用户明确同意前
+  自行将这个限额开到更高或跳过确认。这避免了在用户只需下载一两篇
+  文章时意外启动大规模抓取。
+- 触发示例：“把这位作者（https://juejin.cn/user/xxx）的最新 N 篇
+  文章下载下来” + 用户明确同意启动批量下载。
+
 ## 功能清单
 
 ### 📊 功能一：热门文章排行榜
@@ -229,6 +256,22 @@ AI：正在下载文章并转换为 Markdown 格式...
 ```
 
 ## 🔒 安全限制与风险警告
+
+### 本地文件写入安全限制（`filesystem_write`）
+- `download_article(...)`、`download_user_articles(...)` 以及内部的
+  `_write_markdown_file` / `_download_images` 在写入磁盘之前都会调用
+  `juejin_skill.downloader._validate_output_dir()`：
+  - 写入路径必须位于 `./output`（或 `$JUEJIN_OUTPUT_ROOT`）之下；
+  - 使用 `os.path.realpath` 解析后再比对，可抵御符号链接、`..` 馑越，
+    以及伪造后缀绕过检查。
+- 任何越出根目录的 `output_dir` 传入都会被以
+  `{"success": False, "message": ...}` 形式拒绝，不会创建目录也不会调用 open()。
+- 这保证了 SKILL.md 中 `filesystem_write` 边界与代码实际行为一致。
+
+### 批量下载安全限制（`bulk_download_policy`）
+- `download_user_articles()` 需要显式 `confirm_bulk=True` 才会执行；
+- `max_count` 默认 20、硬上限 `BULK_DOWNLOAD_HARD_CAP=50`，超出会被静默降级；
+- 防止在用户仅下载一两篇文章时被意外启动为全量抓取，控制运营风险与平台合规风险。
 
 ### 本地文件读取安全限制（`filesystem_read`）
 - `publish_markdown(filepath=...)` 会经过

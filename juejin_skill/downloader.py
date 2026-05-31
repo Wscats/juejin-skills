@@ -16,6 +16,9 @@ from juejin_skill.config import (
     JUEJIN_WEB_URL,
     DEFAULT_HEADERS,
     ALLOWED_IMAGE_DOMAINS,
+    DEFAULT_OUTPUT_ROOT,
+    BULK_DOWNLOAD_DEFAULT,
+    BULK_DOWNLOAD_HARD_CAP,
 )
 from juejin_skill.utils import (
     extract_article_id,
@@ -24,6 +27,58 @@ from juejin_skill.utils import (
     timestamp_to_str,
     ensure_dir,
 )
+
+
+# ---------------------------------------------------------------------- #
+# Filesystem-write boundary helpers
+# ---------------------------------------------------------------------- #
+def _resolve_output_root() -> str:
+    """Return the canonical absolute path of the allowed write root."""
+    # Re-resolve every call so a test or caller that has changed the cwd
+    # (relative ./output) sees the correct root.
+    raw = os.environ.get("JUEJIN_OUTPUT_ROOT", "").strip()
+    if raw:
+        return os.path.realpath(os.path.expanduser(raw))
+    # Fall back to the module-default; this is ``<cwd>/output`` resolved at
+    # import time, but if the cwd has changed since import we re-resolve.
+    if os.path.isabs(DEFAULT_OUTPUT_ROOT):
+        return DEFAULT_OUTPUT_ROOT
+    return os.path.realpath(os.path.expanduser(DEFAULT_OUTPUT_ROOT))
+
+
+def _validate_output_dir(output_dir: str) -> str:
+    """Validate *output_dir* and return a canonical absolute path.
+
+    Per SKILL.md, the only filesystem location this skill is allowed to
+    write article files into is ``./output`` (or whatever the user has set
+    via ``$JUEJIN_OUTPUT_ROOT``). This guard enforces that boundary so a
+    caller-supplied ``output_dir`` cannot be coerced into writing to e.g.
+    ``/etc``, ``~/.ssh``, ``/tmp/exfil``, or any other directory outside
+    the declared write scope.
+
+    Raises
+    ------
+    ValueError
+        If *output_dir* is empty, escapes the allowed root via ``..`` /
+        symlinks, or resolves to a location outside the root.
+    """
+    if not output_dir or not isinstance(output_dir, str):
+        raise ValueError("output_dir must be a non-empty string.")
+
+    root = _resolve_output_root()
+    expanded = os.path.expanduser(output_dir)
+    # ``realpath`` resolves symlinks and ``..`` even if the directory does
+    # not yet exist (it walks the existing prefix and appends the rest).
+    candidate = os.path.realpath(expanded)
+
+    if candidate != root and not candidate.startswith(root + os.sep):
+        raise ValueError(
+            f"Refusing to write to {output_dir!r}: path resolves to "
+            f"{candidate!r}, which is outside the allowed write root "
+            f"{root!r}. Set $JUEJIN_OUTPUT_ROOT to an explicit project "
+            "folder if you really need a different location."
+        )
+    return candidate
 
 
 class ArticleDownloader:
@@ -54,29 +109,43 @@ class ArticleDownloader:
         url_or_id : str
             A Juejin post URL or a raw article ID.
         output_dir : str
-            Directory to write the file.
+            Directory to write the file. **Must resolve to a path inside the
+            declared write root** (``./output`` by default, or
+            ``$JUEJIN_OUTPUT_ROOT`` if set). Any path outside that root is
+            rejected with a ``ValueError`` to honour the ``filesystem_write``
+            scope advertised in SKILL.md.
         download_images : bool
             If ``True``, download embedded images to a local ``images/`` folder
-            and rewrite image links.
+            and rewrite image links. Image files inherit the same write-root
+            restriction.
 
         Returns
         -------
         dict
             ``{"success": True, "filepath": "...", "title": "..."}`` on success.
+            On rejection (bad URL, write outside root, etc.) returns
+            ``{"success": False, "message": "..."}``.
         """
         article_id = extract_article_id(url_or_id)
         if not article_id:
             return {"success": False, "message": f"Invalid article URL or ID: {url_or_id}"}
 
+        # Enforce write boundary up-front so any later ensure_dir / open()
+        # is guaranteed to land inside the declared root.
+        try:
+            safe_output_dir = _validate_output_dir(output_dir)
+        except ValueError as exc:
+            return {"success": False, "message": str(exc)}
+
         # Try API first, then fallback to web scraping
         detail = self._fetch_article_detail(article_id)
 
         if detail:
-            return self._save_from_api_detail(detail, article_id, output_dir, download_images)
+            return self._save_from_api_detail(detail, article_id, safe_output_dir, download_images)
 
         # Fallback: scrape from the SSR HTML page
         print(f"[Downloader] API failed, falling back to web scraping for {article_id}...")
-        return self._save_from_web_scraping(article_id, output_dir, download_images)
+        return self._save_from_web_scraping(article_id, safe_output_dir, download_images)
 
     # ------------------------------------------------------------------ #
     #  Save from API detail data
@@ -330,14 +399,29 @@ class ArticleDownloader:
 
         full_md = "\n".join(meta_lines) + mark_content
 
+        # Re-validate the write target. This is defensive: callers reach
+        # this method via download_article / download_user_articles which
+        # both already validate, but a future caller could call
+        # _write_markdown_file directly. Validation is idempotent and cheap.
+        try:
+            safe_output_dir = _validate_output_dir(output_dir)
+        except ValueError as exc:
+            return {"success": False, "message": str(exc)}
+
         # Optionally download images
         if download_images:
-            full_md = self._download_images(full_md, output_dir, article_id)
+            full_md = self._download_images(full_md, safe_output_dir, article_id)
 
         # Write file
-        ensure_dir(output_dir)
+        ensure_dir(safe_output_dir)
         safe_title = sanitize_filename(title)
-        filepath = os.path.join(output_dir, f"{safe_title}.md")
+        filepath = os.path.join(safe_output_dir, f"{safe_title}.md")
+        # Final paranoia check: ensure the resolved filepath itself stays
+        # inside the root (handles pathological titles after sanitisation).
+        try:
+            _validate_output_dir(os.path.dirname(filepath))
+        except ValueError as exc:
+            return {"success": False, "message": str(exc)}
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(full_md)
 
@@ -351,36 +435,97 @@ class ArticleDownloader:
         self,
         user_id_or_url: str,
         output_dir: str = "./output",
-        max_count: int = 100,
+        max_count: int = BULK_DOWNLOAD_DEFAULT,
         download_images: bool = False,
+        confirm_bulk: bool = False,
     ) -> list[dict[str, Any]]:
-        """Download all (or up to *max_count*) articles from a user.
+        """Download up to *max_count* articles from a single user.
+
+        **Scope-creep safeguards.** Earlier versions defaulted to
+        ``max_count=100`` and required no caller acknowledgement, which
+        ClawScan correctly flagged as scope expansion beyond a single-article
+        download feature. This version applies three layered limits so that
+        bulk scraping cannot happen by accident:
+
+        1. ``confirm_bulk`` must be explicitly set to ``True`` by the caller.
+           Otherwise the method refuses and returns a single error dict.
+        2. ``max_count`` is clamped at
+           :data:`juejin_skill.config.BULK_DOWNLOAD_HARD_CAP` (default 50);
+           the default value is
+           :data:`juejin_skill.config.BULK_DOWNLOAD_DEFAULT` (default 20).
+        3. The output directory is validated by :func:`_validate_output_dir`,
+           which keeps every write inside the declared ``./output`` root.
 
         Parameters
         ----------
         user_id_or_url : str
             A Juejin user profile URL or raw user ID.
         output_dir : str
-            Base directory to write files.
+            Base directory to write files. Must resolve inside the declared
+            write root (``./output`` or ``$JUEJIN_OUTPUT_ROOT``).
         max_count : int
-            Maximum number of articles to download.
+            Soft request limit; will be clamped to ``BULK_DOWNLOAD_HARD_CAP``.
         download_images : bool
             If ``True``, also download images.
+        confirm_bulk : bool
+            Required safety interlock. ``download_user_articles`` will refuse
+            to run unless this is explicitly ``True``. Front-end / CLI layers
+            are responsible for collecting human confirmation before flipping
+            this flag.
 
         Returns
         -------
         list[dict]
-            A list of result dicts, one per article.
+            A list of result dicts, one per article (or a single error dict
+            when the call is refused).
         """
+        # ---- Scope-creep interlock -----------------------------------------
+        if not confirm_bulk:
+            return [{
+                "success": False,
+                "message": (
+                    "Refusing bulk download: confirm_bulk=True was not set. "
+                    "Bulk scraping of a user's article list is opt-in. The "
+                    "caller (CLI / agent) must collect explicit human "
+                    "confirmation and then re-invoke with confirm_bulk=True."
+                ),
+                "policy": "bulk-download-requires-confirmation",
+            }]
+
+        # ---- Clamp max_count to the hard cap -------------------------------
+        try:
+            requested = int(max_count)
+        except (TypeError, ValueError):
+            requested = BULK_DOWNLOAD_DEFAULT
+        if requested <= 0:
+            requested = BULK_DOWNLOAD_DEFAULT
+        effective_max = min(requested, BULK_DOWNLOAD_HARD_CAP)
+        if effective_max != requested:
+            print(
+                f"[Downloader] Clamping max_count from {requested} to "
+                f"{effective_max} (BULK_DOWNLOAD_HARD_CAP)."
+            )
+
         user_id = extract_user_id(user_id_or_url)
         if not user_id:
             return [{"success": False, "message": f"Invalid user URL or ID: {user_id_or_url}"}]
 
-        articles = self._fetch_user_article_list(user_id, max_count)
+        # ---- Validate write boundary --------------------------------------
+        try:
+            safe_output_dir = _validate_output_dir(output_dir)
+        except ValueError as exc:
+            return [{"success": False, "message": str(exc)}]
+
+        articles = self._fetch_user_article_list(user_id, effective_max)
         if not articles:
             return [{"success": False, "message": "No articles found for this user."}]
 
-        user_dir = os.path.join(output_dir, f"user_{user_id}")
+        user_dir = os.path.join(safe_output_dir, f"user_{user_id}")
+        # Re-validate after path join to catch any accidental escape.
+        try:
+            user_dir = _validate_output_dir(user_dir)
+        except ValueError as exc:
+            return [{"success": False, "message": str(exc)}]
         ensure_dir(user_dir)
 
         results: list[dict[str, Any]] = []
@@ -468,10 +613,27 @@ class ArticleDownloader:
 
     def _download_images(self, md_text: str, output_dir: str, article_id: str) -> str:
         """Download images referenced in the Markdown and rewrite paths.
-        
-        Only downloads images from allowed domains (security restriction).
+
+        Only downloads images from allowed domains (security restriction)
+        and only writes them under the validated output root.
         """
-        img_dir = os.path.join(output_dir, "images", article_id)
+        # Re-validate so a direct caller cannot bypass download_article's
+        # output_dir boundary check.
+        try:
+            safe_output_dir = _validate_output_dir(output_dir)
+        except ValueError as exc:
+            print(f"[Downloader] Refusing to download images: {exc}")
+            return md_text
+
+        # Sanitise article_id so it cannot contain path separators that
+        # would walk out of safe_output_dir/images/.
+        safe_article_id = re.sub(r"[^A-Za-z0-9_\-]", "_", str(article_id))[:64] or "unknown"
+        img_dir = os.path.join(safe_output_dir, "images", safe_article_id)
+        try:
+            _validate_output_dir(img_dir)
+        except ValueError as exc:
+            print(f"[Downloader] Refusing to download images: {exc}")
+            return md_text
         ensure_dir(img_dir)
 
         # Match Markdown images: ![alt](url)
@@ -488,7 +650,7 @@ class ArticleDownloader:
                 ext = self._guess_image_ext(url)
                 filename = f"img_{idx}{ext}"
                 local_path = os.path.join(img_dir, filename)
-                relative_path = os.path.join("images", article_id, filename)
+                relative_path = os.path.join("images", safe_article_id, filename)
 
                 resp = httpx.get(url, timeout=30, follow_redirects=True)
                 resp.raise_for_status()

@@ -1,5 +1,7 @@
 """Configuration constants for Juejin API."""
 
+import os
+
 # Juejin base URLs
 JUEJIN_WEB_URL = "https://juejin.cn"
 JUEJIN_API_BASE = "https://api.juejin.cn"
@@ -13,6 +15,25 @@ ALLOWED_IMAGE_DOMAINS = [
     "p9-juejin.byteimg.com",
 ]
 
+# ----------------------------------------------------------------------- #
+# Filesystem-write boundary
+# ----------------------------------------------------------------------- #
+# All article-download writes must stay inside DEFAULT_OUTPUT_ROOT (or under
+# the user-overridden $JUEJIN_OUTPUT_ROOT). This is the single source of
+# truth for the ``filesystem_write`` scope advertised in SKILL.md.
+DEFAULT_OUTPUT_ROOT = os.path.realpath(
+    os.path.expanduser(os.environ.get("JUEJIN_OUTPUT_ROOT", "./output"))
+)
+
+# Bulk-download safety limits. ``download_user_articles`` refuses to fetch
+# more than BULK_DOWNLOAD_HARD_CAP items in a single call, regardless of
+# what max_count the caller passes, and defaults to BULK_DOWNLOAD_DEFAULT
+# when no value is given. This bounds the scope of any one invocation and
+# matches the "single article + small bulk on explicit request" framing in
+# SKILL.md.
+BULK_DOWNLOAD_DEFAULT = 20
+BULK_DOWNLOAD_HARD_CAP = 50
+
 # API endpoints
 CATEGORY_BRIEFS_URL = f"{JUEJIN_API_BASE}/tag_api/v1/query_category_briefs"
 CATEGORY_TAGS_URL = f"{JUEJIN_API_BASE}/recommend_api/v1/tag/recommend_tag_list"
@@ -24,8 +45,6 @@ DRAFT_CREATE_URL = f"{JUEJIN_API_BASE}/content_api/v1/article_draft/create"
 ARTICLE_PUBLISH_URL = f"{JUEJIN_API_BASE}/content_api/v1/article/publish"
 
 # Cookie storage path
-import os
-
 COOKIE_FILE_PATH = os.path.expanduser("~/.juejin_cookie.json")
 
 # Default request headers
